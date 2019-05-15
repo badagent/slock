@@ -1,6 +1,6 @@
 /* user and group to drop privileges to */
 static const char *user  = "nobody";
-static const char *group = "nogroup";
+static const char *group = "nobody";
 
 static const char *colorname[NUMCOLS] = {
 	[INIT] =   "black",     /* after initialization */
@@ -8,7 +8,7 @@ static const char *colorname[NUMCOLS] = {
 	[FAILED] = "#CC3333",   /* wrong password */
 };
 
-static const char *background_image = NULL;
+static const char *background_image = "/home/badagent/wallpaper.ff";
 
 /* treat a cleared input like a wrong password (color) */
 static const int failonclear = 1;

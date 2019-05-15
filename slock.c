@@ -4,6 +4,7 @@
 #include <shadow.h>
 #endif
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
 #include <grp.h>
@@ -31,10 +32,14 @@ enum {
 	NUMCOLS
 };
 
+XImage *bg_img;
+
 struct lock {
 	int screen;
 	Window root, win;
+	GC gc;
 	Pixmap pmap;
+	Pixmap background_pixmap;
 	unsigned long colors[NUMCOLS];
 };
 
@@ -82,6 +87,56 @@ dontkillme(void)
 	}
 }
 #endif
+
+
+int load_farbfeld(FILE *fp, u_int32_t *width, u_int32_t *height, u_int8_t **buffer) {
+	unsigned  long i,j,off,j_adj;
+	char header[8];
+	u_int16_t *row_ptr;
+	unsigned int array_size,row_length;
+
+	fread(&header,1,8,fp);
+	if(strcmp(header,"farbfeld")) {
+		die("Error: Invalid header\n");
+	}
+
+	fread(width,1,4,fp);
+	fread(height,1,4,fp);
+
+	*height = ntohl(*height);
+	*width = ntohl(*width);
+
+	array_size = (*height)  * (*width) * 4;
+	*buffer = malloc(array_size);
+	if (*buffer==NULL) die("Could not allocate buffer\n");	
+
+	//Read image
+	row_length = *width * 8;
+	row_ptr = malloc(row_length);
+
+	if(row_ptr==NULL) {
+		free(*buffer);
+		die("Could not allocate row_ptr\n");
+	}
+	off = 0;
+	for (i=0;i<*height;i++) {
+		if(fread(row_ptr,1,row_length,fp)<row_length) {
+			free(row_ptr);
+			free(*buffer);
+			die("Error reading image\n");
+		}
+		for(j=0;j<*width;j++) {
+			j_adj = j*4;
+			(*buffer)[off] = row_ptr[j_adj+2];
+			(*buffer)[off+1] = row_ptr[j_adj+1];
+			(*buffer)[off+2] = row_ptr[j_adj];
+			(*buffer)[off+3] = row_ptr[j_adj+3];
+			off+=4;
+		}
+	}
+	free(row_ptr);
+	return 0;
+}
 
 static const char *
 gethash(void)
@@ -231,9 +286,16 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 
 	if (dpy == NULL || screen < 0 || !(lock = malloc(sizeof(struct lock))))
 		return NULL;
-
+		
 	lock->screen = screen;
 	lock->root = RootWindow(dpy, lock->screen);
+	
+	/* Background Image as Pixmap */
+	if(background_image != NULL) {
+		lock->background_pixmap = XCreatePixmap(dpy,lock->root,DisplayWidth(dpy,screen),DisplayHeight(dpy,screen),DefaultDepth(dpy,screen));
+		lock->gc = XCreateGC(dpy,lock->background_pixmap,0,NULL);
+		XPutImage(dpy,lock->background_pixmap,lock->gc,bg_img,0,0,0,0,DisplayWidth(dpy,screen),DisplayHeight(dpy,screen));
+	}
 
 	for (i = 0; i < NUMCOLS; i++) {
 		XAllocNamedColor(dpy, DefaultColormap(dpy, lock->screen),
@@ -244,14 +306,27 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	/* init */
 	wa.override_redirect = 1;
 	wa.background_pixel = lock->colors[INIT];
-	lock->win = XCreateWindow(dpy, lock->root, 0, 0,
-	                          DisplayWidth(dpy, lock->screen),
-	                          DisplayHeight(dpy, lock->screen),
-	                          0, DefaultDepth(dpy, lock->screen),
-	                          CopyFromParent,
-	                          DefaultVisual(dpy, lock->screen),
-	                          CWOverrideRedirect | CWBackPixel, &wa);
-	lock->pmap = XCreateBitmapFromData(dpy, lock->win, curs, 8, 8);
+	wa.background_pixmap = lock->background_pixmap;
+	if(background_image != NULL) {
+		lock->win = XCreateWindow(dpy, lock->root, 0, 0,
+	        	                  DisplayWidth(dpy, lock->screen),
+	               	           	  DisplayHeight(dpy, lock->screen),
+	                          	  0, DefaultDepth(dpy, lock->screen),
+	                          	  CopyFromParent,
+	                          	  DefaultVisual(dpy, lock->screen),
+	                          	  CWOverrideRedirect | CWBackPixmap , &wa);
+	} else {
+		lock->win = XCreateWindow(dpy, lock->root, 0, 0,
+	        	                  DisplayWidth(dpy, lock->screen),
+	               	           	  DisplayHeight(dpy, lock->screen),
+	                          	  0, DefaultDepth(dpy, lock->screen),
+	                          	  CopyFromParent,
+	                          	  DefaultVisual(dpy, lock->screen),
+	                          	  CWOverrideRedirect | CWBackPixel , &wa);
+	}
+	
+
+	lock->pmap = XCreateBitmapFromData(dpy, lock->win, curs, 8, 8); 
 	invisible = XCreatePixmapCursor(dpy, lock->pmap, lock->pmap,
 	                                &color, &color, 0, 0);
 	XDefineCursor(dpy, lock->win, invisible);
@@ -315,6 +390,10 @@ main(int argc, char **argv) {
 	Display *dpy;
 	int s, nlocks, nscreens;
 
+	u_int8_t *bg_buf;	
+	FILE *bg;	
+	u_int32_t bg_height,bg_width;
+
 	ARGBEGIN {
 	case 'v':
 		fprintf(stderr, "slock-"VERSION"\n");
@@ -322,6 +401,7 @@ main(int argc, char **argv) {
 	default:
 		usage();
 	} ARGEND
+
 
 	/* validate drop-user and -group */
 	errno = 0;
@@ -346,6 +426,21 @@ main(int argc, char **argv) {
 
 	if (!(dpy = XOpenDisplay(NULL)))
 		die("slock: cannot open display\n");
+
+
+	//Load bg image
+	if(background_image != NULL) {
+		bg = fopen(background_image,"rb");
+		if(bg==NULL) {
+			perror("fopen");
+			die("Could not open background image %s.",background_image);
+		}
+		if(load_farbfeld(bg,&bg_width,&bg_height,&bg_buf)!=0) {
+			die("Could not load background image");
+		}
+		fclose(bg);
+		bg_img = XCreateImage(dpy,CopyFromParent,24,ZPixmap,0,(char *)bg_buf,bg_width,bg_height,32,0);
+	}
 
 	/* drop privileges */
 	if (setgroups(0, NULL) < 0)
@@ -390,6 +485,10 @@ main(int argc, char **argv) {
 
 	/* everything is now blank. Wait for the correct password */
 	readpw(dpy, &rr, locks, nscreens, hash);
+
+	if(background_image != NULL) {
+		XDestroyImage(bg_img);
+	}
 
 	return 0;
 }
